@@ -2,6 +2,7 @@
 import ast
 import sqlite3
 import tempfile
+from contextlib import ExitStack
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -20,9 +21,17 @@ ns = dict(sqlite3=sqlite3, datetime=datetime, timedelta=timedelta, timezone=time
           defaultdict=defaultdict, hourly_snapshot=hourly_snapshot,
           brisbane_now=lambda: now, OAK_NAME='oak')
 exec(compile(ast.Module(body=functions, type_ignores=[]), '<helpers>', 'exec'), ns)
-with tempfile.TemporaryDirectory() as folder:
+# SQLite's transaction context commits/rolls back but does not close the handle.
+# Close every test connection before TemporaryDirectory removes test.db on Windows.
+with tempfile.TemporaryDirectory() as folder, ExitStack() as connections:
+    def tracked_connect(*args, **kwargs):
+        connection = sqlite3.connect(*args, **kwargs)
+        connections.callback(connection.close)
+        return connection
+
+    ns['sqlite3'] = SimpleNamespace(connect=tracked_connect)
     ns['DB'] = Path(folder)/'test.db'
-    with sqlite3.connect(ns['DB']) as con:
+    with tracked_connect(ns['DB']) as con:
         con.execute('CREATE TABLE counts(id INTEGER PRIMARY KEY, ts TEXT, metric_utc REAL, source TEXT)')
         for day, hour, minute, source in [(14,5,1,'oak'),(14,5,2,'oak'),(14,18,0,'oak'),(15,5,1,'video')]:
             t = now.replace(day=day,hour=hour,minute=minute)
